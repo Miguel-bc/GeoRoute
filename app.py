@@ -4,6 +4,7 @@ import geopandas as gpd
 import pandas as pd
 import folium
 from folium.plugins import MarkerCluster
+from folium.plugins import FastMarkerCluster
 
 from PyQt6.QtCore import QUrl
 from PyQt6.QtWidgets import (
@@ -24,7 +25,7 @@ class VentanaPrincipal(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GeoRoute - Clúster de Portales")
+        self.setWindowTitle("GeoRoute")
         self.setGeometry(100, 100, 1200, 750)
         self.setStyleSheet("""
             QMainWindow {
@@ -77,11 +78,25 @@ class VentanaPrincipal(QMainWindow):
         self.btn_urr.clicked.connect(self.cargar_archivo_urr)
         layout_izquierdo.addWidget(self.btn_urr)
 
+        self.btn_generar = QPushButton("🌐 Generar Mapa")
+        self.btn_generar.setStyleSheet("""
+            QPushButton {
+                background-color: #D40511;
+                color: white;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 12px;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #B3040E;
+            }
+        """)
+        self.btn_generar.clicked.connect(self.generar_mapa_inicial)
+        layout_izquierdo.addWidget(self.btn_generar)
+
         self.consola = QTextEdit()
-        self.consola.setReadOnly(True)
-        self.consola.setPlaceholderText(
-            "Aquí aparecerá el registro de actividad y mensajes..."
-        )
+        self.consola.setReadOnly(True)        
         self.consola.setStyleSheet("""
             QTextEdit {
                 background-color: #FFFFFF;
@@ -94,6 +109,7 @@ class VentanaPrincipal(QMainWindow):
             }
         """)
         layout_izquierdo.addWidget(self.consola)
+
         layout_principal.addWidget(panel_izquierdo, stretch=1)
 
         # Panel Derecho (Visor Web para el Mapa)
@@ -122,10 +138,9 @@ class VentanaPrincipal(QMainWindow):
 
         # Cargar el mapa base centrado en España al iniciar
         self.inicializar_mapa_espana()
-        self.consola.append("Aplicación iniciada correctamente. Mapa base centrado en España.")
+        self.consola.append("✔️ Aplicación iniciada correctamente. Mapa base centrado en España.")
 
     def inicializar_mapa_espana(self):
-        # Coordenadas centrales de España (Madrid / Centro peninsular)
         lat_espana = 40.4168
         lon_espana = -3.7038
 
@@ -154,9 +169,8 @@ class VentanaPrincipal(QMainWindow):
         self.consola.append(f"\n📂 Archivo seleccionado: {nombre_corto}")
 
         try:
-            # Cargar capa de portales
             self.gdf_portales = gpd.read_file(archivo, layer="portalpk_publi")
-            self.consola.append(f"✔️ Capa de portales cargada: {len(self.gdf_portales):,} registros.")
+            self.consola.append(f"✅ Capa de portales cargada: {len(self.gdf_portales):,} registros.")
 
         except Exception as e:
             self.consola.append(f"❌ Error al leer la capa de portales del GPKG: {str(e)}")
@@ -182,81 +196,105 @@ class VentanaPrincipal(QMainWindow):
             except UnicodeDecodeError:
                 self.df_urr = pd.read_csv(archivo, sep=";", encoding='latin1')
 
-            self.consola.append(f"✔️ Archivo CSV cargado con éxito: {len(self.df_urr):,} registros.")
-            self.consola.append(f"📊 Columnas disponibles: {list(self.df_urr.columns)}")
-
-            
+            self.consola.append(f"✅ Archivo CSV cargado con éxito: {len(self.df_urr):,} registros.")
+            self.consola.append(f"📊 Columnas disponibles: {list(self.df_urr.columns)}")            
 
         except Exception as e:
             self.consola.append(f"❌ Error al leer el archivo CSV: {str(e)}")
 
-
+    def generar_mapa_inicial(self):
+        self.generar_mapa_clusters()
+        
     def generar_mapa_clusters(self):
         try:
-            self.consola.append("⚙️ Procesando coordenadas y creando clústeres de portales.")
+            self.consola.append("⚙️ Procesando coordenadas y creando clústeres por vehículo...")
 
             df = self.gdf_portales.copy()
-            df["cod_postal"] = df["cod_postal"].fillna("00000").astype(str)
+            df["cod_postal"] = df["cod_postal"].fillna("00000").astype(str)  
+            
+            df_urr_temp = self.df_urr.copy()
+            df_urr_temp["Codigo Postal"] = df_urr_temp["Codigo Postal"].fillna(0).astype(str)
+            df_urr_temp = df_urr_temp.drop_duplicates(subset=["Codigo Postal"], keep="first")
+            
+            df = df.merge(
+                df_urr_temp[["Codigo Postal", "Codigo Vehiculo"]], 
+                left_on="cod_postal", 
+                right_on="Codigo Postal",  
+                how="left"
+            )
+            df["Codigo Vehiculo"] = df["Codigo Vehiculo"].fillna("Sin Vehículo Asignado")
+            self.consola.append(f"✅ Vehículos integrados correctamente ({len(df):,} portales únicos).")
+            
             df_wgs84 = df.to_crs(epsg=4326)
             self.consola.append("✅ Datos limpios y transformados a WGS84")
-
-            # Calcular centro específico de los datos cargados para hacer zoom automático al archivo
+            
             minx, miny, maxx, maxy = df_wgs84.total_bounds
             centro_lat = (miny + maxy) / 2
             centro_lon = (minx + maxx) / 2
-
-            # Crear mapa centrado en los datos
+            
+            # Inicializamos el mapa con el centro calculado de Murcia y aplicamos fit_bounds
             mapa = folium.Map(
                 location=[centro_lat, centro_lon],
-                zoom_start=12,
+                zoom_start=11,
                 tiles="OpenStreetMap",
             )
+            mapa.fit_bounds([[miny, minx], [maxy, maxx]])
 
-            # Crear el contenedor de clústeres optimizado
-            marker_cluster = MarkerCluster(name="Portales Clúster").add_to(mapa)
+            self.consola.append("🎨 Agrupando puntos y asignando colores por vehículo...")
 
-            # Paleta de colores para diferenciar según el código postal
-            colores = [
+            colores_disponibles = [
                 "red", "blue", "green", "purple", "orange", 
-                "darkred", "darkblue", "cadetblue", "darkgreen"
+                "darkred", "darkblue", "cadetblue", "darkgreen", "pink"
             ]
 
-            # Diccionario dinámico para asignar un color consistente a cada código postal
-            cp_colores = {}
+            vehiculos_unicos = df_wgs84["Codigo Vehiculo"].unique()
+            
+            vehiculo_colores = {
+                veh: colores_disponibles[i % len(colores_disponibles)] 
+                for i, veh in enumerate(vehiculos_unicos)
+            }
 
-            # Iterar sobre los puntos e insertarlos en el clúster
-            for _, row in df_wgs84.iterrows():
-                geom = row.geometry
-                if geom is None or geom.is_empty:
-                    continue
-                
-                lat, lon = geom.y, geom.x
-                cp = row["cod_postal"]
+            for vehiculo in vehiculos_unicos:
+                df_veh = df_wgs84[df_wgs84["Codigo Vehiculo"] == vehiculo]
+                color_actual = vehiculo_colores[vehiculo]
 
-                if cp not in cp_colores:
-                    cp_colores[cp] = colores[len(cp_colores) % len(colores)]
-                
-                color_icono = cp_colores[cp]
+                layer_group = folium.FeatureGroup(name=f"Vehículo: {vehiculo}").add_to(mapa)
 
-                folium.CircleMarker(
-                    location=[lat, lon],
-                    radius=5,
-                    color=color_icono,
-                    fill=True,
-                    fill_color=color_icono,
-                    fill_opacity=0.7,
-                    tooltip=f"Código Postal: {cp}"
-                ).add_to(marker_cluster)
+                data_puntos = []
+                for geom, cp in zip(df_veh.geometry, df_veh["cod_postal"]):
+                    if geom is not None and not geom.is_empty:
+                        data_puntos.append([
+                            geom.y, 
+                            geom.x, 
+                            f"CP: {cp} | Vehículo: {vehiculo}"
+                        ])
 
-            # Renderizar HTML en el QWebEngineView
+                if data_puntos:
+                    FastMarkerCluster(
+                        data=data_puntos,
+                        name=f"Clúster {vehiculo}",
+                        overlay=True,
+                        control=True,
+                        icon_create_function=f"""
+                            function(cluster) {{
+                                return L.divHtmlIcon({{
+                                    html: '<div style="background-color: {color_actual}; color: white; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; border: 2px solid white;">' + cluster.getChildCount() + '</div>',
+                                    className: 'custom-cluster-icon',
+                                    iconSize: [35, 35]
+                                }});
+                            }}
+                        """
+                    ).add_to(layer_group)
+
+            folium.LayerControl(collapsed=False).add_to(mapa)
+
             html_content = mapa.get_root().render()
             self.web_view.setHtml(html_content, QUrl("https://localhost"))
 
-            self.consola.append(f"🎉 ¡Clústeres generados con éxito! ({len(df_wgs84):,} portales mapeados)")
+            self.consola.append(f"🎉 ¡Mapa ajustado y generado con éxito en Murcia ({len(df_wgs84):,} portales)!")
 
         except Exception as e:
             self.consola.append(f"❌ Error al generar los clústeres: {str(e)}")
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
